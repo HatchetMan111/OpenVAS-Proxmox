@@ -1,0 +1,17 @@
+[Unit]
+Description=Greenbone Community Edition (OpenVAS) - docker compose
+Documentation=https://greenbone.github.io/docs/latest/22.4/container/
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/greenbone
+ExecStart=/usr/bin/docker compose -f /opt/greenbone/compose.yaml up -d
+ExecStop=/usr/bin/docker compose -f /opt/greenbone/compose.yaml down
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
