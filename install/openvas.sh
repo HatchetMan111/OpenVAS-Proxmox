@@ -33,7 +33,21 @@ set -euo pipefail
 # ---------------- Variablen (oben, anpassbar) ----------------
 APP="${APP:-openvas}"
 CTID="${CTID:-}"                          # leer = naechste freie ID via pvesh
-HOSTNAME="${HOSTNAME:-openvas}"
+# ACHTUNG: NICHT $HOSTNAME verwenden - Bash setzt $HOSTNAME automatisch auf
+# den Hostnamen des Proxmox-Hosts (z.B. "Prox"), sodass :-Defaults nie greifen
+# wuerden und der CT falsch benannt wuerde. Darum eigene Variable:
+#   CT_HOSTNAME=OpenVAS  (Default: openvas; Kleinbuchstaben empfohlen)
+# Kompatibilitaet: ein explizit exportiertes, vom Systemnamen abweichendes
+# $HOSTNAME wird noch als CT-Name uebernommen.
+_SYS_HOST="$(hostname 2>/dev/null || echo "")"
+if [[ -n "${CT_HOSTNAME:-}" ]]; then
+  CT_NAME="$CT_HOSTNAME"
+elif [[ -n "${HOSTNAME:-}" && "${HOSTNAME}" != "$_SYS_HOST" ]]; then
+  CT_NAME="$HOSTNAME"
+  echo "[WARN] Variable HOSTNAME ist veraltet, bitte CT_HOSTNAME=$HOSTNAME verwenden." >&2
+else
+  CT_NAME="openvas"
+fi
 PROFILE="${PROFILE:-sparsam}"             # sparsam | produktiv
 # Sparsam-Default (Greenbone-Minimum zum Ausprobieren). Override z.B.:
 #   PROFILE=produktiv  -> 4 CPU / 8 GB / 30 GB
@@ -137,12 +151,12 @@ fi
 export ADMIN_PASS  # fuer pct exec Umgebung
 
 # ---------------- LXC erstellen ----------------
-msg "Erstelle LXC $CTID ($HOSTNAME): ${CPU}vCPU / ${RAM}MB / ${DISK}GB, $TEMPLATE ..."
+msg "Erstelle LXC $CTID ($CT_NAME): ${CPU}vCPU / ${RAM}MB / ${DISK}GB, $TEMPLATE ..."
 NETSTR="name=eth0,bridge=${BRIDGE},ip=${IP_MODE}"
 [[ -n "$GW" ]] && NETSTR="${NETSTR},gw=${GW}"
 
 pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
-  --hostname "$HOSTNAME" \
+  --hostname "$CT_NAME" \
   --cores "$CPU" --memory "$RAM" --swap "$SWAP" \
   --rootfs "${STORAGE}:${DISK}" \
   --net0 "$NETSTR" --nameserver "$NAMESERVER" \
@@ -413,7 +427,7 @@ CT_ADMIN_USER="$(pct exec "$CTID" -- cat "$INSTALL_DIR/.admin_user" 2>/dev/null 
 CT_ADMIN_PASS="$(pct exec "$CTID" -- cat "$INSTALL_DIR/.admin_pass" 2>/dev/null || echo "$ADMIN_PASS")"
 CRED_FILE="/root/openvas-${CTID}-login.txt"
 {
-  echo "Greenbone OpenVAS - CT $CTID ($HOSTNAME)"
+  echo "Greenbone OpenVAS - CT $CTID ($CT_NAME)"
   echo "URL: https://$CT_IP/"
   echo "User: $CT_ADMIN_USER"
   echo "Pass: $CT_ADMIN_PASS"
@@ -422,7 +436,7 @@ chmod 600 "$CRED_FILE"
 echo ""
 echo "================ FERTIG ================"
 echo "Greenbone OpenVAS (Community Edition)"
-echo "Container : $CTID ($HOSTNAME)"
+echo "Container : $CTID ($CT_NAME)"
 echo "############################################################"
 echo "# Web-UI Login:"
 echo "#   URL : https://$CT_IP/"

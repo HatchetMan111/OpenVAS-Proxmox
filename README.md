@@ -60,7 +60,7 @@ ADMIN_PASS='MeinStarkesPass!' bash -c "$(wget -qLO - https://raw.githubuserconte
 | `PROFILE` | `sparsam` (2 CPU / 4096 MB / 40 GB) | `produktiv` = 4 CPU / 8192 MB / 60 GB |
 | `CPU` / `RAM` / `DISK` | s. Profil | Direkt-Override schlägt `PROFILE`. **RAM nie unter 4096!** |
 | `CTID` | nächste freie ID (`pvesh get /cluster/nextid`) | Container-ID |
-| `HOSTNAME` | `openvas` | CT-Hostname |
+| `CT_HOSTNAME` | `openvas` | CT-Hostname (z. B. `CT_HOSTNAME=OpenVAS`; NICHT `HOSTNAME` — das ist der Proxmox-Hostname!) |
 | `STORAGE` / `TEMPLATE_STORAGE` | `local-lvm` / `local` | LXC-Disk- bzw. Template-Storage |
 | `BRIDGE` | `vmbr0` | Netzwerk-Bridge |
 | `IP_MODE` / `GW` | `dhcp` / leer | Statisch z. B. `IP_MODE=192.168.1.50/24 GW=192.168.1.1` |
