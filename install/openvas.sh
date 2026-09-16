@@ -160,14 +160,29 @@ done
 ok "Netzwerk OK."
 
 # ---------------- App im Container installieren ----------------
-# Idempotent: laeuft auch bei Re-Run (Ordner pruefen, compose pull/up).
+# Idempotent: laeuft auch bei Re-Run.
 # WICHTIG: ADMIN_PASS wird explizit per env uebergeben - pct exec
 # vererbt die Host-Umgebung NICHT automatisch.
+# Das CT-Skript wird per pct push als Datei uebertragen (statt stdin-Heredoc),
+# damit die Fehlerausgabe die kurze Befehlszeile zeigt statt 100+ Zeilen.
 msg "Installiere Docker + Greenbone-Stack im Container (Pull 10-30 Min, Feed-Sync 30 Min - 2h) ..."
-pct exec "$CTID" -- env ADMIN_PASS="$ADMIN_PASS" bash -s -- "$WEB_PORT" "$ADMIN_USER" "$INSTALL_DIR" "$COMPOSE_URL" <<'INNER_EOF'
+INNER_TMP="$(mktemp /tmp/greenbone-inner-XXXXXX.sh)"
+cat > "$INNER_TMP" <<'INNER_SCRIPT_EOF'
 set -euo pipefail
 WEB_PORT="$1"; ADMIN_USER="$2"; INSTALL_DIR="$3"; COMPOSE_URL="$4"
 ADMIN_PASS="${ADMIN_PASS:?ADMIN_PASS fehlt (Host: pct exec vererbt kein env - Skriptfehler, bitte Issue melden)}"
+
+diag() {
+  echo "----- Diagnose -----" >&2
+  docker compose -f "$INSTALL_DIR/compose.yaml" ps 2>&1 | tail -n 25 >&2 || true
+  echo "--- scap-data logs (tail 20) ---" >&2
+  docker compose -f "$INSTALL_DIR/compose.yaml" logs --tail=20 scap-data 2>&1 | tail -n 20 >&2 || true
+  echo "--- vulnerability-tests logs (tail 10) ---" >&2
+  docker compose -f "$INSTALL_DIR/compose.yaml" logs --tail=10 vulnerability-tests 2>&1 | tail -n 10 >&2 || true
+  echo "--- Platte / RAM ---" >&2
+  df -h /var/lib/docker 2>/dev/null >&2 || df -h >&2 || true
+  free -m >&2 || true
+}
 
 echo "[CT] Debian aktualisieren ..."
 export DEBIAN_FRONTEND=noninteractive
@@ -234,32 +249,50 @@ EOF
 systemctl daemon-reload
 systemctl enable greenbone-openvas.service
 
-echo "[CT] Images ziehen + Stack starten ..."
+echo "[CT] Images ziehen ..."
 docker compose -f "$INSTALL_DIR/compose.yaml" pull
-docker compose -f "$INSTALL_DIR/compose.yaml" up -d
+
+echo "[CT] Stack starten ..."
+echo "[CT] Hinweis: 'Created' / 'health: starting' bei gvmd/gsad/nginx ist NORMAL solange scap-data/vulnerability-tests laden."
+echo "[CT] 'scap-data is unhealthy' kurz nach dem Start ist meist transient (Feed-Download laeuft noch) - es wird bis zu 60 Min neu versucht."
+UP_OK=0
+for i in $(seq 1 30); do
+  if docker compose -f "$INSTALL_DIR/compose.yaml" up -d 2>&1 | tail -n 5; then UP_OK=1; break; fi
+  echo "[CT] 'up -d' Versuch $i/30 fehlgeschlagen (Feed laedt evtl. noch), warte 120s ..." >&2
+  sleep 120
+  if (( i % 5 == 0 )); then
+    echo "[CT] ... noch am Warten ($((i*2)) / 60 Min)." >&2
+    diag
+  fi
+done
+FALLBACK=0
+if [[ "$UP_OK" -ne 1 ]]; then
+  echo "[CT] WARN: 'up -d' nach 60 Min weiterhin fehlerhaft - Fallback: Kern-Stack ohne Feed-Abhaengigkeiten starten," >&2
+  echo "[CT] damit Web-UI + Admin trotzdem angelegt werden (Feed-Sync laeuft im Hintergrund weiter)." >&2
+  diag
+  docker compose -f "$INSTALL_DIR/compose.yaml" up -d --no-deps pg-gvm redis-server gvmd gsad gsa nginx ospd-openvas openvasd openvas gvm-tools || true
+  FALLBACK=1
+fi
 systemctl start greenbone-openvas.service || true
+echo "greenbone-fallback=$FALLBACK" > "$INSTALL_DIR/.fallback"
 echo "[CT] Aktueller Stack-Status:"
 docker compose -f "$INSTALL_DIR/compose.yaml" ps || docker ps -a --format 'table {{.Names}}\t{{.Status}}'
 
-echo "[CT] Warte auf Feed-Daten (health: starting -> healthy, max 60 Min) ..."
-echo "[CT] Hinweis: 'Created' bei gvmd/gsad/nginx ist NORMAL solange scap-data/vulnerability-tests noch laden."
-for i in $(seq 1 360); do
+echo "[CT] Warte auf gvmd (max 30 Min, Feed-Wait lief bereits beim Stack-Start) ..."
+for i in $(seq 1 180); do
   if docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --get-users >/dev/null 2>&1; then
     echo "[CT] gvmd antwortet nach ca. $((i*10))s."
     break
   fi
   if (( i % 30 == 0 )); then
-    echo "[CT] ... noch am Warten ($((i*10))s / 3600s). Status:"
+    echo "[CT] ... noch am Warten ($((i*10))s / 1800s). Status:"
     docker compose -f "$INSTALL_DIR/compose.yaml" ps 2>&1 | tail -n 25 || true
   fi
   sleep 10
-  if [[ "$i" -eq 360 ]]; then
-    echo "[CT] FEHLER: gvmd antwortet nach 60 Min nicht. Diagnose:" >&2
-    docker compose -f "$INSTALL_DIR/compose.yaml" ps >&2 || true
-    docker compose -f "$INSTALL_DIR/compose.yaml" logs --tail=50 gvmd >&2 || true
-    echo "[CT] Haeufigste Ursache: Feed-Sync laeuft noch (scap/vulnerability-tests 'health: starting')," >&2
-    echo "[CT] oder zu wenig RAM (<4 GB -> Postgres/gvmd OOM). Weiter mit Admin-Anlage wird versucht," >&2
-    echo "[CT] bricht aber ggf. ab - dann einfach Skript erneut laufen lassen (idempotent)." >&2
+  if [[ "$i" -eq 180 ]]; then
+    echo "[CT] FEHLER: gvmd antwortet nach 30 Min nicht. Diagnose:" >&2
+    diag
+    echo "[CT] Skript erneut laufen lassen ist idempotent und setzt fort." >&2
   fi
 done
 
@@ -291,7 +324,11 @@ echo "$ADMIN_USER" > "$INSTALL_DIR/.admin_user"
 printf '%s' "$ADMIN_PASS" > "$INSTALL_DIR/.admin_pass"
 chmod 600 "$INSTALL_DIR/.admin_pass"
 echo "[CT] Fertig. Feed-Sync laeuft ggf. im Hintergrund weiter (30 Min - 2h bis Scans stabil)."
-INNER_EOF
+INNER_SCRIPT_EOF
+pct push "$CTID" "$INNER_TMP" /tmp/greenbone-install-inner.sh
+pct exec "$CTID" -- chmod 700 /tmp/greenbone-install-inner.sh
+rm -f "$INNER_TMP"
+pct exec "$CTID" -- env ADMIN_PASS="$ADMIN_PASS" bash /tmp/greenbone-install-inner.sh "$WEB_PORT" "$ADMIN_USER" "$INSTALL_DIR" "$COMPOSE_URL"
 ok "Installation im Container abgeschlossen."
 
 # onboot sicherstellen (reboot-sicher)
@@ -301,8 +338,16 @@ pct set "$CTID" --onboot 1
 msg "Verifiziere: Service + Web-UI ..."
 pct exec "$CTID" -- systemctl is-active --quiet docker
 ok "docker.service laeuft."
-pct exec "$CTID" -- systemctl is-active --quiet greenbone-openvas
-ok "greenbone-openvas.service laeuft."
+if pct exec "$CTID" -- systemctl is-active --quiet greenbone-openvas; then
+  ok "greenbone-openvas.service laeuft."
+else
+  warn "greenbone-openvas.service (noch) nicht aktiv - meist Feed noch unvollstaendig (Fallback-Modus)."
+  warn "Pruefen: pct exec $CTID -- systemctl status greenbone-openvas --no-pager ; entscheidend ist der Web-UI-Check unten."
+fi
+if [[ "$(pct exec "$CTID" -- cat "$INSTALL_DIR/.fallback" 2>/dev/null || echo none)" == "greenbone-fallback=1" ]]; then
+  warn "Fallback-Modus aktiv: Kern-Stack ohne Feed-Abhaengigkeiten gestartet. Nach fertigem Feed einmal:"
+  warn "  pct exec $CTID -- bash -c 'cd $INSTALL_DIR && docker compose up -d && systemctl restart greenbone-openvas'"
+fi
 CT_IP="$(pct exec "$CTID" -- hostname -I | awk '{print $1}')"
 [[ -z "$CT_IP" ]] && CT_IP="(DHCP-IP via 'pct exec $CTID -- hostname -I' prüfen)"
 msg "Container-IP: $CT_IP"

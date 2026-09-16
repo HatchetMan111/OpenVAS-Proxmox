@@ -74,23 +74,47 @@ EOF
 systemctl daemon-reload
 systemctl enable greenbone-openvas.service
 
+diag() {
+  docker compose -f "$INSTALL_DIR/compose.yaml" ps 2>&1 | tail -n 25 || true
+  echo "--- scap-data logs (tail 20) ---"
+  docker compose -f "$INSTALL_DIR/compose.yaml" logs --tail=20 scap-data 2>&1 | tail -n 20 || true
+  echo "--- vulnerability-tests logs (tail 10) ---"
+  docker compose -f "$INSTALL_DIR/compose.yaml" logs --tail=10 vulnerability-tests 2>&1 | tail -n 10 || true
+  echo "--- Platte / RAM ---"
+  df -h /var/lib/docker 2>/dev/null || df -h || true
+  free -m || true
+}
+
 $STD docker compose -f "$INSTALL_DIR/compose.yaml" pull
-$STD docker compose -f "$INSTALL_DIR/compose.yaml" up -d
+msg_info "Starting stack (Retry bis 60 Min: 'scap-data unhealthy' direkt nach Start ist meist transient, Feed laedt noch)"
+UP_OK=0
+for i in $(seq 1 30); do
+  if docker compose -f "$INSTALL_DIR/compose.yaml" up -d 2>&1 | tail -n 5; then UP_OK=1; break; fi
+  msg_info "'up -d' Versuch $i/30 fehlgeschlagen, warte 120s ..."
+  sleep 120
+  (( i % 5 == 0 )) && diag || true
+done
+FALLBACK=0
+if [[ "$UP_OK" -ne 1 ]]; then
+  msg_info "WARN: 'up -d' nach 60 Min fehlerhaft - Fallback: Kern-Stack ohne Feed-Abhaengigkeiten (Feed sync weiter im Hintergrund)"
+  diag || true
+  docker compose -f "$INSTALL_DIR/compose.yaml" up -d --no-deps pg-gvm redis-server gvmd gsad gsa nginx ospd-openvas openvasd openvas gvm-tools || true
+  FALLBACK=1
+fi
 systemctl start greenbone-openvas.service || true
+echo "greenbone-fallback=$FALLBACK" > "$INSTALL_DIR/.fallback"
 docker compose -f "$INSTALL_DIR/compose.yaml" ps || true
 
-msg_info "Waiting for gvmd (Feed-Sync: 30 Min - 2h, max 60 Min Wait)"
-msg_info "Hinweis: 'Created' bei gvmd/gsad/nginx ist normal solange Feed-Daten laden (health: starting)"
+msg_info "Waiting for gvmd (max 30 Min, Feed-Wait lief bereits beim Stack-Start)"
 GVMD_OK=0
-for i in $(seq 1 360); do
+for i in $(seq 1 180); do
   docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --get-users >/dev/null 2>&1 && { GVMD_OK=1; break; }
   (( i % 30 == 0 )) && docker compose -f "$INSTALL_DIR/compose.yaml" ps || true
   sleep 10
 done
 if [[ "$GVMD_OK" -ne 1 ]]; then
-  msg_error "gvmd antwortet nach 60 Min nicht. Diagnose: docker compose -f $INSTALL_DIR/compose.yaml ps + docker compose logs gvmd"
-  docker compose -f "$INSTALL_DIR/compose.yaml" ps || true
-  docker compose -f "$INSTALL_DIR/compose.yaml" logs --tail=50 gvmd || true
+  msg_error "gvmd antwortet nach 30 Min nicht. Diagnose: docker compose -f $INSTALL_DIR/compose.yaml ps + docker compose logs gvmd"
+  diag || true
   # Nicht sofort hart abbrechen: Admin-Anlage wird trotzdem versucht (idempotent bei Re-Run).
 fi
 docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --create-user="$ADMIN_USER" 2>/dev/null || true
@@ -109,7 +133,14 @@ msg_ok "Deployed Stack (Admin: $ADMIN_USER)"
 
 msg_info "Verifying Installation"
 systemctl is-active --quiet docker || { msg_error "docker.service nicht aktiv!"; journalctl -u docker --no-pager -n 50; exit 1; }
-systemctl is-active --quiet greenbone-openvas || { msg_error "greenbone-openvas.service nicht aktiv!"; journalctl -u greenbone-openvas --no-pager -n 50; exit 1; }
+if systemctl is-active --quiet greenbone-openvas; then
+  msg_ok "greenbone-openvas.service laeuft"
+else
+  msg_info "WARN: greenbone-openvas.service (noch) nicht aktiv - meist Feed noch unvollstaendig (Fallback-Modus). Entscheidend ist der Web-UI-Check."
+fi
+if [[ "$(cat "$INSTALL_DIR/.fallback" 2>/dev/null || echo none)" == "greenbone-fallback=1" ]]; then
+  msg_info "WARN: Fallback-Modus - nach fertigem Feed einmal 'docker compose up -d && systemctl restart greenbone-openvas' im CT ausfuehren."
+fi
 WEB_OK=0
 for i in $(seq 1 24); do
   for URL in "https://127.0.0.1:${WEB_PORT}/login" "https://127.0.0.1:443/login" "http://127.0.0.1:${WEB_PORT}/" "http://127.0.0.1:${WEB_PORT}/login"; do

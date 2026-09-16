@@ -88,6 +88,28 @@ Sparsam-Tipps: max. 1–2 Ziele, 1 paralleler Scan, kein Full-Port-Range beim er
 
 ## Fehlerbehebung (häufige Fälle)
 
+### `dependency failed to start: ... scap-data-1 is unhealthy` (häufigster Abbruch)
+
+**Was man sieht:** `docker compose up -d` bricht ab, `gvmd/gsad/nginx` bleiben auf `Created`, `scap-data` steht auf `(unhealthy)`, `vulnerability-tests` auf `(health: starting)`.
+
+**Ursache:** Der SCAP/VT-Feed-Download läuft noch (30 Min – 2 h beim ersten Mal), der eingebaute Healthcheck von `scap-data` schlägt in der Zwischenzeit fehl. Compose verweigert deshalb den Start aller abhängigen Dienste. **Kein Defekt** — nur zu früh.
+
+**Lösung (seit Fix):** Das Skript versucht `up -d` bis zu 60 Min alle 2 Min neu (mit `scap-data`-Logs + Platte/RAM-Diagnose alle 10 Min) und wartet danach noch bis 30 Min auf gvmd. Bleibt der Feed störrisch, startet es den Kern-Stack (`gvmd`, `gsad`, `gsa`, `nginx`, `ospd-openvas`, …) per `--no-deps`, damit Web-UI + Admin trotzdem angelegt werden — der Feed sync im Hintergrund weiter. Erkennbar an der Warnung `Fallback-Modus aktiv`. Nach fertigem Feed einmal im CT:
+
+```bash
+pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose up -d && systemctl restart greenbone-openvas'
+```
+
+Manuell derselbe Weg:
+
+```bash
+pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose logs --tail=30 scap-data && df -h /var/lib/docker && free -m'
+# Abwarten bis scap-data healthy, dann:
+pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose up -d'
+```
+
+Erst wenn `scap-data` über **2 h** `unhealthy` bleibt, liegt ein echtes Problem vor (Platte voll, RAM < 4 GB, Registry/Feed nicht erreichbar) — dann die drei Diagnosebefehle oben + `docker compose logs scap-data` sichern und melden.
+
 ### `Exit-Code 1` nach `Admin-User setzen` / `gvmd --get-users`
 
 **Ursache:** gvmd läuft noch nicht, weil die Feed-Container (`vulnerability-tests`, `scap-data`: `health: starting`) 30 Min – 2 h laden. `docker ps` zeigt dann `Created` bei `gvmd/gsad/nginx` — **das ist normal**, kein Absturz. Das alte Skript wartete nur 5 Min und brach danach beim Passwort-Setzen ab.
