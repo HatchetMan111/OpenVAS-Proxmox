@@ -11,6 +11,7 @@ RemainAfterExit=yes
 WorkingDirectory=/opt/greenbone
 ExecStart=/usr/bin/docker compose -f /opt/greenbone/compose.yaml up -d
 ExecStop=/usr/bin/docker compose -f /opt/greenbone/compose.yaml down
+ExecReload=/usr/bin/docker compose -f /opt/greenbone/compose.yaml pull
 Restart=no
 
 [Install]

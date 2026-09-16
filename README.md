@@ -1,91 +1,133 @@
-# OpenVAS / Greenbone Community Edition für Proxmox (LXC, Community-Scripts-Stil)
+# OpenVAS / Greenbone Community Edition für Proxmox (LXC)
 
-Installiert den **kompletten Greenbone-Stack** (openvas-scanner + gvmd + gsad + gsa + ospd-openvas + redis + postgres + nginx) als LXC auf Proxmox. Am Ende: Web-UI im LAN, alles einstellbar, reboot-sicher.
+Greenbone Community Edition (vollständiger Stack: Scanner + Manager + Web-UI) als unprivilegierter LXC auf Proxmox VE. Ein Befehl auf dem Host, Rest läuft automatisch im Container per Docker Compose. Reboot-sicher via systemd.
 
-> Hinweis: `greenbone/openvas-scanner` allein hat **keine Web-UI**. Darum nutzt dieses Script die offiziellen Greenbone-Container (einzige wartbare Methode im LXC; Source-Build dauert Stunden und bricht oft).
+> `greenbone/openvas-scanner` allein hat **keine Web-UI**. Dieses Repo installiert den kompletten offiziellen Stack per Docker Compose — die einzige wartbare Methode im LXC (Source-Build dauert Stunden und bricht oft ab).
 
-## Einzeiler (Proxmox-Host, als root)
+## Was wird installiert
 
-Eigenes Repo (Platzhalter `USER/REPO` ersetzen):
-
-```bash
-bash -c "$(wget -qLO - https://raw.githubusercontent.com/USER/REPO/main/install/openvas.sh)"
-```
-
-Debug mit Trace + Voll-Log:
-
-```bash
-bash -x -c "$(wget -qLO - https://raw.githubusercontent.com/USER/REPO/main/install/openvas.sh)"
-# Log liegt danach unter /tmp/openvas-install-*.log (Pfad steht zu Beginn der Ausgabe)
-```
-
-### Parameter (optional, vorangestellt)
-
-```bash
-# Sparsam-Test (Default, 2 CPU / 4 GB / 20 GB):
-bash -c "$(wget -qLO - https://raw.githubusercontent.com/USER/REPO/main/install/openvas.sh)"
-
-# Produktiv (4 CPU / 8 GB / 30 GB):
-PROFILE=produktiv bash -c "$(wget -qLO - https://raw.githubusercontent.com/USER/REPO/main/install/openvas.sh)"
-
-# statische IP:
-CTID=150 IP_MODE=192.168.1.50/24 GW=192.168.1.1 \
-bash -c "$(wget -qLO - https://raw.githubusercontent.com/USER/REPO/main/install/openvas.sh)"
-
-# eigenes Admin-Passwort:
-ADMIN_PASS='MeinStarkesPass!' bash -c "$(wget -qLO - .../openvas.sh)"
-```
-
-| Var | Default (sparsam) | Bedeutung |
+| Komponente | Container | Zweck |
 |---|---|---|
-| `PROFILE` | sparsam (2 / 4096 MB / 20 GB) | `produktiv` = 4 / 8192 MB / 30 GB |
-| `CPU/RAM/DISK` | 2 / 4096 MB / 20 GB | Direkt-Override schlägt `PROFILE`; **RAM nicht unter 4096** (Postgres/gvmd OOM, Feed-Sync bricht) |
-| `CTID` | nächste freie ID | Container-ID |
-| `STORAGE` | local-lvm | LXC-Disk-Storage |
-| `TEMPLATE_STORAGE` | local | Template-Storage |
-| `BRIDGE` | vmbr0 | Netzwerk-Bridge |
-| `IP_MODE/GW` | dhcp | oder statisch `IP_MODE=192.168.1.50/24 GW=192.168.1.1` |
-| `WEB_PORT` | 9392 | Web-UI-Port |
-| `ADMIN_USER/ADMIN_PASS` | admin / zufällig | Login Web-UI |
+| openvas-scanner / openvasd / ospd-openvas | `openvas`, `openvasd`, `ospd-openvas` | Scan-Engine + Notus |
+| gvmd | `gvmd` | Manager (User, Tasks, Feed-Import) |
+| gsad + gsa | `gsad`, `gsa` | Web-Daemon + Web-UI |
+| nginx | `nginx` | TLS-Reverse-Proxy, Ports **443 + 9392** (auf `0.0.0.0` geöffnet für LAN) |
+| postgres | `pg-gvm`, `pg-gvm-migrator` | Datenbank |
+| redis | `redis-server` | Task-Queue |
+| Feed-Loader | `vulnerability-tests`, `scap-data`, `cert-bund-data`, `dfn-cert-data`, `data-objects`, `notus-data`, `report-formats`, `gpg-data`, `gvm-config`, `configure-openvas`, `gvm-tools` | NVTs, SCAP, CERT, Notus (~10–15 GB) |
 
-Voraussetzungen: Proxmox VE 8.x, Internet (Feed + Docker-Hub + `registry.community.greenbone.net`), Template `debian-12-standard` (wird auto geladen).
+Installationspfad im CT: `/opt/greenbone/compose.yaml`, systemd-Unit: `greenbone-openvas.service`, Zugangsdaten: `/opt/greenbone/.admin_user` / `.admin_pass` (600).
+
+## Voraussetzungen
+
+- Proxmox VE 8.x, Internet (Docker Hub + `registry.community.greenbone.net` + Greenbone-Feed erreichbar)
+- Template `debian-12-standard` (wird automatisch geladen, wenn fehlend)
+- **Minimum: 2 vCPU / 4 GB RAM / 20 GB Disk.** Unter 4 GB sterben Postgres/gvmd per OOM, der Feed-Sync bricht ab. Produktiv: 4 vCPU / 8 GB / 30–60 GB.
+- LXC braucht `nesting=1` + `keyctl=1` (setzt das Skript automatisch) für Docker.
+- CT-ID frei, Bridge `vmbr0`, Storage `local-lvm` (alles per Env überschreibbar).
+
+## Schnellstart (Proxmox-Host, als root)
+
+```bash
+bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVAS-Proxmox/main/install/openvas.sh)"
+```
+
+Mit Debug-Trace und Voll-Log (bei Fehlern **immer** so starten):
+
+```bash
+bash -x -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVAS-Proxmox/main/install/openvas.sh)"
+# Voll-Log: /tmp/openvas-install-*.log (Pfad steht zu Beginn der Ausgabe)
+```
+
+### Beispiele
+
+```bash
+# Produktiv-Profil (4 CPU / 8 GB / 30 GB):
+PROFILE=produktiv bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVAS-Proxmox/main/install/openvas.sh)"
+
+# Statische IP:
+CTID=150 IP_MODE=192.168.1.50/24 GW=192.168.1.1 \
+  bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVAS-Proxmox/main/install/openvas.sh)"
+
+# Eigenes Admin-Passwort (sonst zufällig generiert + am Ende angezeigt):
+ADMIN_PASS='MeinStarkesPass!' bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVAS-Proxmox/main/install/openvas.sh)"
+```
+
+### Alle Variablen
+
+| Var | Default | Bedeutung |
+|---|---|---|
+| `PROFILE` | `sparsam` (2 CPU / 4096 MB / 20 GB) | `produktiv` = 4 CPU / 8192 MB / 30 GB |
+| `CPU` / `RAM` / `DISK` | s. Profil | Direkt-Override schlägt `PROFILE`. **RAM nie unter 4096!** |
+| `CTID` | nächste freie ID (`pvesh get /cluster/nextid`) | Container-ID |
+| `HOSTNAME` | `openvas` | CT-Hostname |
+| `STORAGE` / `TEMPLATE_STORAGE` | `local-lvm` / `local` | LXC-Disk- bzw. Template-Storage |
+| `BRIDGE` | `vmbr0` | Netzwerk-Bridge |
+| `IP_MODE` / `GW` | `dhcp` / leer | Statisch z. B. `IP_MODE=192.168.1.50/24 GW=192.168.1.1` |
+| `WEB_PORT` | `9392` | Web-UI-Port (nginx lauscht zusätzlich auf 443) |
+| `ADMIN_USER` / `ADMIN_PASS` | `admin` / zufällig (16 Zeichen) | Web-UI-Login |
+| `INSTALL_DIR` | `/opt/greenbone` | Pfad im CT |
+| `COMPOSE_URL` | Greenbone-Docs `compose.yaml` | Nur bei Bedarf überschreiben (Version pinnen) |
 
 ## Nach der Installation
 
-- Web-UI: `http://<LXC-IP>:9392` (ggf. auch `https://<LXC-IP>` / `https://<LXC-IP>:9392`, je nach nginx-Template) — bind `0.0.0.0`, Login `admin` + angezeigtes Passwort.
-- Feed-Sync dauert **30 Min – 2 h**: erst danach scannen! Status:
-  ```bash
-  pct exec <CTID> -- docker compose -f /opt/greenbone/compose.yaml logs -f gvmd
-  ```
-- Reboot-Test:
-  ```bash
-  pct reboot <CTID>
-  sleep 60
-  pct exec <CTID> -- systemctl is-active docker greenbone-openvas
-  curl -sk -o /dev/null -w "%{http_code}\n" https://<LXC-IP>:9392/login
-  ```
+1. **Web-UI öffnen:** `https://<LXC-IP>:9392/login` (Fallback `https://<LXC-IP>/login`). Zertifikatswarnung bestätigen (selbstsigniert). Login: `admin` + Passwort aus der Abschlussausgabe (oder `pct exec <CTID> -- cat /opt/greenbone/.admin_pass`).
+2. **Feed abwarten:** 30 Min – 2 h bis zum ersten Scan! Status:
+   ```bash
+   pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose ps && docker compose logs -f gvmd'
+   ```
+3. **Reboot-Test:**
+   ```bash
+   pct reboot <CTID> && sleep 60
+   pct exec <CTID> -- systemctl is-active docker greenbone-openvas
+   curl -sk -o /dev/null -w "%{http_code}\n" https://<LXC-IP>:9392/login  # 200/302 = ok
+   ```
+4. **Skalieren ohne Neuinstallation:** `pct set <CTID> --cores 4 --memory 8192` + CT-Neustart; Platte: `pct resize <CTID> rootfs +20G`.
 
-## Sparsam testen: was geht, was nicht
+Sparsam-Tipps: max. 1–2 Ziele, 1 paralleler Scan, kein Full-Port-Range beim ersten Test.
 
-- Sparsam-Profil = Greenbone-Minimum (2 CPU / 4 GB / 20 GB). Darunter bitte nicht gehen: Postgres + gvmd brauchen ~2–3 GB allein, Feed-Sync (VTs, SCAP, CERT, Notus) belegt ~10–15 GB Platte und dauert beim ersten Mal 30 Min–2 h.
-- Sparsam-Tipps: nur 1–2 Scan-Ziele gleichzeitig, max. 1 paralleler Scan, keine Full-Port-Range beim ersten Test.
-- Hochskalieren jederzeit ohne Neuinstallation: `pct set <CTID> --cores 4 --memory 8192`, dann CT neu starten. Platte ggf. `pct resize <CTID> rootfs +20G`.
+## Fehlerbehebung (häufige Fälle)
 
-## Alternativen aus deinen Links (berücksichtigt)
+### `Exit-Code 1` nach `Admin-User setzen` / `gvmd --get-users`
 
-- **Enterprise OPENVAS SCAN Appliance (Greenbone-Blog, 12/2025):** offiziell Proxmox-VE-fähig, `.zst`-Backup nach `/var/lib/vz/dump` kopieren → in Proxmox unter Storage → Backups → Restore. Aber: 2 vCPU / **12 GB RAM / 500 GB Disk**, Lizenz/Trial via Greenbone-Vertrieb — also das Gegenteil von sparsam. Für „läuft es überhaupt?" ist der Community-LXC hier sinnvoller.
-- **Altes Forum (2020, GCE-ISO auf Proxmox-VM):** Workaround damals war VMware-PVSCSI + VMXNET3 statt E1000/IDE, weil GCE die Proxmox-Defaults nicht erkannte. Heute: nimm bei einer **VM**-Variante VirtIO-SCSI + VirtIO-Net (Paravirtualisiert) + `qemu-guest-agent`, BIOS OVMF nur wenn nötig. Für unseren **LXC** irrelevant (keine emulierte HW), nur wichtig falls du später auf VM wechselst.
+**Ursache:** gvmd läuft noch nicht, weil die Feed-Container (`vulnerability-tests`, `scap-data`: `health: starting`) 30 Min – 2 h laden. `docker ps` zeigt dann `Created` bei `gvmd/gsad/nginx` — **das ist normal**, kein Absturz. Das alte Skript wartete nur 5 Min und brach danach beim Passwort-Setzen ab.
 
-## Community-Scripts-Variante (2 Dateien, für ProxmoxVE-Fork/PR)
+**Lösung (seit Fix):** Skript wartet bis 60 Min mit Statusausgabe alle 5 Min, setzt das Passwort mit 12 Retries und gibt bei Fehlschlag `docker compose logs gvmd` aus. Einfach erneut starten (idempotent) oder manuell:
 
-- `ct/openvas.sh` — Einstieg (sourced `build.func`, definiert `APP`, Ressourcen, `update_script()`), starten via `bash ct/openvas.sh`
-- `install/openvas-install.sh` — läuft im Container (nutzt `$FUNCTIONS_FILE_PATH`, installiert Docker, deployed Stack, systemd, Verifikation mit vollem `journalctl`/`docker logs` bei Fehlern)
+```bash
+pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose ps; docker compose logs --tail=50 gvmd'
+# Warten bis gvmd antwortet, dann:
+pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose exec -u gvmd -T gvmd gvmd --get-users'
+```
 
-## Update / Deinstall
+### `ADMIN_PASS fehlt (Host-Export)`
+
+Ältere Version verließ sich auf `export ADMIN_PASS` — `pct exec` vererbt Host-Env aber nicht. Fix: Übergabe per `env ADMIN_PASS=...`. Falls der Fehler trotzdem kommt: Skript aus diesem Repo neu laden (nicht aus Cache/alter URL).
+
+### Web-UI antwortet nicht / Verbindung verweigert
+
+1. Bindung prüfen: `pct exec <CTID> -- grep -n "9392\|443" /opt/greenbone/compose.yaml` muss `0.0.0.0:9392` + `0.0.0.0:443` zeigen (Skript patcht `127.0.0.1` automatisch).
+2. Immer **https** nutzen (`https://<IP>:9392/login`), nicht http.
+3. Container-Status: `pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose ps'`.
+4. Firewall/Reverse-Proxy vor Proxmox? Port 9392 + 443 freigeben.
+
+### OOM / Feed bricht ab / Postgres stirbt
+
+`pct exec <CTID> -- free -m` und `dmesg | grep -i oom` prüfen. Unter ~3,5 GB wird der Stack instabil → auf 4 GB+ erhöhen (`pct set <CTID> --memory 8192`, Neustart).
+
+### Docker startet nicht im LXC
+
+Features prüfen: `pct config <CTID> | grep features` muss `nesting=1,keyctl=1` zeigen. Unprivilegierter CT + nesting ist Pflicht. Danach `pct exec <CTID> -- systemctl status docker`.
+
+## Update / Backup / Deinstall
 
 ```bash
 # Update (im LXC):
 pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose pull && docker compose up -d'
+
+# Backup (Host): Zugangsdaten + compose sichern, oder CT-Backup via Proxmox:
+pct exec <CTID> -- cat /opt/greenbone/.admin_pass
+vzdump <CTID> --storage local --mode snapshot
 
 # Deinstall:
 pct stop <CTID> && pct destroy <CTID>
@@ -94,13 +136,42 @@ pct stop <CTID> && pct destroy <CTID>
 ## Struktur
 
 ```
-install/openvas.sh          <- Standalone-Einzeiler (Host: pct create + pct exec)
-ct/openvas.sh               <- Community-Scripts CT-Einstieg
-install/openvas-install.sh  <- Community-Scripts Install-Teil (im CT)
-greenbone-openvas.service   <- systemd-Unit (Referenz, wird vom Script angelegt)
+install/openvas.sh          <- Standalone-Einzeiler (Host: pct create + pct exec + Verify)
+ct/openvas.sh               <- Community-Scripts CT-Einstieg (build.func, APP, update_script)
+install/openvas-install.sh  <- Community-Scripts Install-Teil (läuft IM CT)
+greenbone-openvas.service   <- systemd-Unit (Referenz; Skript legt sie im CT an)
 README.md
 ```
 
+Community-Scripts-Variante: `ct/openvas.sh` via `build.func` (`start` → `build_container`), Update-Pfad über `update_script()`.
+
+## Sicherheitshinweise
+
+- Web-UI hängt nach dem Patch auf `0.0.0.0` — nur im vertrauenswürdigen LAN betreiben oder per Firewall/Reverse-Proxy absichern.
+- Selbstsigniertes nginx-Zertifikat (Greenbone-Template generiert es automatisch). Für öffentlich erreichbare Setups eigenes Zertifikat hinterlegen.
+- `.admin_pass` liegt mit 600 in `/opt/greenbone/` — nach dem Ablegen Passwort im Passwort-Manager speichern und bei Bedarf rotieren (`gvmd --user=admin --new-password=...`).
+- Scanner mit `NET_ADMIN`/`NET_RAW` (Promiscuous Mode für Alive-Detection) — normal für OpenVAS, aber kein ungehärtetes WAN-Interface direkt an den CT hängen.
+
+## Enterprise-Alternative (zum Einordnen)
+
+Greenbone bietet seit 12/2025 eine Proxmox-fähige **Enterprise Appliance** (`.zst`-Backup → `/var/lib/vz/dump` → Restore): 2 vCPU / **12 GB RAM / 500 GB Disk**, Lizenz/Trial via Vertrieb. Für „läuft es überhaupt?" ist der Community-LXC hier sparsamer.
+
 ## Fehler melden
 
-Immer beilegen: komplettes Log `/tmp/openvas-install-*.log`, Exit-Code, `bash -x`-Ausschnitt, Ausgabe von `pct exec <CTID> -- systemctl --failed`, `docker ps -a`, `journalctl -u greenbone-openvas -n 50`. Niemals nur die letzte Zeile.
+Immer beilegen: komplettes Log `/tmp/openvas-install-*.log`, Exit-Code, `bash -x`-Ausschnitt, dazu:
+
+```bash
+pct exec <CTID> -- systemctl --failed
+pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose ps'
+pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose logs --tail=50 gvmd gsad nginx'
+pct exec <CTID> -- journalctl -u greenbone-openvas -n 50 --no-pager
+```
+
+Niemals nur die letzte Zeile posten.
+
+## Quellen / Lizenz
+
+- Greenbone Container-Doku: <https://greenbone.github.io/docs/latest/22.4/container/>
+- Compose-File: <https://greenbone.github.io/docs/latest/_static/compose.yaml>
+- Scanner-Repo: <https://github.com/greenbone/openvas-scanner>
+- Lizenz dieses Repos: MIT

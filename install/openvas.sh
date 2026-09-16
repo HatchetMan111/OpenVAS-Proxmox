@@ -10,9 +10,9 @@
 # lokal, reboot-sicher via systemd.
 #
 # Einzeiler (auf dem Proxmox-Host als root):
-#   bash -c "$(wget -qLO - https://raw.githubusercontent.com/USER/REPO/main/install/openvas.sh)"
+#   bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVAS-Proxmox/main/install/openvas.sh)"
 # Debug bei Fehlern:
-#   bash -x -c "$(wget -qLO - https://raw.githubusercontent.com/USER/REPO/main/install/openvas.sh)"
+#   bash -x -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVAS-Proxmox/main/install/openvas.sh)"
 #
 # Getestet auf: Proxmox VE 8.x, LXC Template debian-12-standard
 # Profile: SPARSAM (Default zum Ausprobieren) = 2 CPU / 4 GB RAM / 20 GB.
@@ -85,7 +85,10 @@ error_trap() {
   if [[ -n "${CTID:-}" ]] && pct status "$CTID" >/dev/null 2>&1; then
     echo "--- pct exec Status im CT $CTID ---" >&2
     pct exec "$CTID" -- systemctl --no-pager --failed 2>&1 | tail -n 30 >&2 || true
-    pct exec "$CTID" -- docker ps -a 2>&1 | tail -n 30 >&2 || true
+    pct exec "$CTID" -- docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' 2>&1 | tail -n 30 >&2 || true
+    # Greenbone-spezifisch: compose-Status + gvmd-Logs (Feed braucht 30 Min - 2h,
+    # Container im Status "Created" sind normal solange Feed-Daten laden -> health: starting)
+    pct exec "$CTID" -- bash -c 'cd /opt/greenbone 2>/dev/null && docker compose ps 2>&1 | tail -n 30; echo "--- gvmd logs (tail 30) ---"; docker compose logs --tail=30 gvmd 2>&1 | tail -n 30' >&2 || true
     pct exec "$CTID" -- journalctl -u greenbone-openvas --no-pager -n 50 2>&1 | tail -n 50 >&2 || true
   fi
   echo "Tipp: erneut mit 'bash -x' starten fuer Zeilen-Trace." >&2
@@ -157,12 +160,14 @@ done
 ok "Netzwerk OK."
 
 # ---------------- App im Container installieren ----------------
-# Idempotent: laeuft auch bei Re-Run ( Ordner pruefen, compose pull/up ).
-msg "Installiere Docker + Greenbone-Stack im Container (dauert 10-30 Min beim ersten Pull/Feed) ..."
-pct exec "$CTID" -- bash -s -- "$WEB_PORT" "$ADMIN_USER" "$INSTALL_DIR" "$COMPOSE_URL" <<'INNER_EOF'
+# Idempotent: laeuft auch bei Re-Run (Ordner pruefen, compose pull/up).
+# WICHTIG: ADMIN_PASS wird explizit per env uebergeben - pct exec
+# vererbt die Host-Umgebung NICHT automatisch.
+msg "Installiere Docker + Greenbone-Stack im Container (Pull 10-30 Min, Feed-Sync 30 Min - 2h) ..."
+pct exec "$CTID" -- env ADMIN_PASS="$ADMIN_PASS" bash -s -- "$WEB_PORT" "$ADMIN_USER" "$INSTALL_DIR" "$COMPOSE_URL" <<'INNER_EOF'
 set -euo pipefail
 WEB_PORT="$1"; ADMIN_USER="$2"; INSTALL_DIR="$3"; COMPOSE_URL="$4"
-ADMIN_PASS="${ADMIN_PASS:?ADMIN_PASS fehlt (Host-Export)}"
+ADMIN_PASS="${ADMIN_PASS:?ADMIN_PASS fehlt (Host: pct exec vererbt kein env - Skriptfehler, bitte Issue melden)}"
 
 echo "[CT] Debian aktualisieren ..."
 export DEBIAN_FRONTEND=noninteractive
@@ -188,19 +193,28 @@ docker compose version
 echo "[CT] Greenbone-Verzeichnis: $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
-if [[ ! -f compose.yaml ]]; then
+# compose.yaml: neu laden wenn fehlend, leer oder ohne gvmd-Service (veraltete Datei).
+if [[ ! -s compose.yaml ]] || ! grep -q "^\s*gvmd:" compose.yaml 2>/dev/null; then
+  echo "[CT] Lade offizielles compose.yaml ..."
   curl -fSL "$COMPOSE_URL" -o compose.yaml
+else
+  echo "[CT] compose.yaml vorhanden ($(wc -l < compose.yaml) Zeilen), kein Re-Download."
 fi
 
 echo "[CT] Ports auf 0.0.0.0 oeffnen (LAN-Zugriff statt nur localhost) ..."
 # Offizielles compose bindet nginx auf 127.0.0.1:443 + 127.0.0.1:9392 -> auf 0.0.0.0 umbiegen
 sed -i -E 's/127\.0\.0\.1:(443|9392)/0.0.0.0:\1/g' compose.yaml
 grep -n "9392\|443" compose.yaml | head -n 10
+if ! grep -q "0.0.0.0:${WEB_PORT}" compose.yaml; then
+  echo "[CT] WARN: Port-Bindung 0.0.0.0:${WEB_PORT} nicht gefunden - nginx evtl. nur via localhost erreichbar." >&2
+fi
 
 echo "[CT] systemd-Unit greenbone-openvas.service anlegen ..."
+DOCKER_BIN="$(command -v docker)"
 cat > /etc/systemd/system/greenbone-openvas.service <<EOF
 [Unit]
 Description=Greenbone Community Edition (OpenVAS) - docker compose
+Documentation=https://greenbone.github.io/docs/latest/22.4/container/
 After=docker.service network-online.target
 Wants=network-online.target
 Requires=docker.service
@@ -209,8 +223,9 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=$INSTALL_DIR
-ExecStart=/usr/bin/docker compose -f $INSTALL_DIR/compose.yaml up -d
-ExecStop=/usr/bin/docker compose -f $INSTALL_DIR/compose.yaml down
+ExecStart=${DOCKER_BIN} compose -f $INSTALL_DIR/compose.yaml up -d
+ExecStop=${DOCKER_BIN} compose -f $INSTALL_DIR/compose.yaml down
+ExecReload=${DOCKER_BIN} compose -f $INSTALL_DIR/compose.yaml pull
 Restart=no
 
 [Install]
@@ -223,22 +238,59 @@ echo "[CT] Images ziehen + Stack starten ..."
 docker compose -f "$INSTALL_DIR/compose.yaml" pull
 docker compose -f "$INSTALL_DIR/compose.yaml" up -d
 systemctl start greenbone-openvas.service || true
+echo "[CT] Aktueller Stack-Status:"
+docker compose -f "$INSTALL_DIR/compose.yaml" ps || docker ps -a --format 'table {{.Names}}\t{{.Status}}'
 
-echo "[CT] Warte auf gvmd (max 5 Min) ..."
-for i in $(seq 1 60); do
-  if docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --get-users >/dev/null 2>&1; then break; fi
-  sleep 5
+echo "[CT] Warte auf Feed-Daten (health: starting -> healthy, max 60 Min) ..."
+echo "[CT] Hinweis: 'Created' bei gvmd/gsad/nginx ist NORMAL solange scap-data/vulnerability-tests noch laden."
+for i in $(seq 1 360); do
+  if docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --get-users >/dev/null 2>&1; then
+    echo "[CT] gvmd antwortet nach ca. $((i*10))s."
+    break
+  fi
+  if (( i % 30 == 0 )); then
+    echo "[CT] ... noch am Warten ($((i*10))s / 3600s). Status:"
+    docker compose -f "$INSTALL_DIR/compose.yaml" ps 2>&1 | tail -n 25 || true
+  fi
+  sleep 10
+  if [[ "$i" -eq 360 ]]; then
+    echo "[CT] FEHLER: gvmd antwortet nach 60 Min nicht. Diagnose:" >&2
+    docker compose -f "$INSTALL_DIR/compose.yaml" ps >&2 || true
+    docker compose -f "$INSTALL_DIR/compose.yaml" logs --tail=50 gvmd >&2 || true
+    echo "[CT] Haeufigste Ursache: Feed-Sync laeuft noch (scap/vulnerability-tests 'health: starting')," >&2
+    echo "[CT] oder zu wenig RAM (<4 GB -> Postgres/gvmd OOM). Weiter mit Admin-Anlage wird versucht," >&2
+    echo "[CT] bricht aber ggf. ab - dann einfach Skript erneut laufen lassen (idempotent)." >&2
+  fi
 done
 
 echo "[CT] Admin-User setzen: $ADMIN_USER ..."
+# create-user schlaegt fehl wenn User existiert -> ok (|| true).
 docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --create-user="$ADMIN_USER" 2>/dev/null || true
-docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --user="$ADMIN_USER" --new-password="$ADMIN_PASS"
-docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --modify-setting 78eceaec-3385-11ea-b237-28d24461215b --value "$(docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --get-users --verbose | awk -v u="$ADMIN_USER" '$0~u{print $2; exit}')" || true
+# Passwort setzen mit Retry (gvmd braucht nach Start ein paar Sekunden).
+PASS_OK=0
+for i in $(seq 1 12); do
+  if docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --user="$ADMIN_USER" --new-password="$ADMIN_PASS" 2>&1; then PASS_OK=1; break; fi
+  echo "[CT] Passwort-Setzen Versuch $i/12 fehlgeschlagen, warte 10s ..." >&2
+  sleep 10
+done
+if [[ "$PASS_OK" -ne 1 ]]; then
+  echo "[CT] FEHLER: Konnte Passwort fuer '$ADMIN_USER' nicht setzen. gvmd-Logs:" >&2
+  docker compose -f "$INSTALL_DIR/compose.yaml" logs --tail=50 gvmd >&2 || true
+  exit 1
+fi
+# Feed-Owner auf Admin setzen (UUID 78eceaec-... = "Feed Import Owner").
+# Getrennt in zwei Schritten, damit set -e bei leerer UUID nicht abbricht.
+FEED_OWNER="$(docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --get-users --verbose 2>/dev/null | awk -v u="$ADMIN_USER" '$0~u{print $2; exit}' || true)"
+if [[ -n "${FEED_OWNER:-}" ]]; then
+  docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd gvmd --modify-setting 78eceaec-3385-11ea-b237-28d24461215b --value "$FEED_OWNER" || true
+else
+  echo "[CT] WARN: Feed-Owner-UUID nicht gefunden, überspringe modify-setting." >&2
+fi
 
 echo "$ADMIN_USER" > "$INSTALL_DIR/.admin_user"
 printf '%s' "$ADMIN_PASS" > "$INSTALL_DIR/.admin_pass"
 chmod 600 "$INSTALL_DIR/.admin_pass"
-echo "[CT] Fertig. Feed-Sync laeuft im Hintergrund (30 Min - 2h bis Scans stabil)."
+echo "[CT] Fertig. Feed-Sync laeuft ggf. im Hintergrund weiter (30 Min - 2h bis Scans stabil)."
 INNER_EOF
 ok "Installation im Container abgeschlossen."
 
@@ -255,11 +307,14 @@ CT_IP="$(pct exec "$CTID" -- hostname -I | awk '{print $1}')"
 [[ -z "$CT_IP" ]] && CT_IP="(DHCP-IP via 'pct exec $CTID -- hostname -I' prüfen)"
 msg "Container-IP: $CT_IP"
 
-# HTTP-Check auf localhost:9392 im CT (nginx/gsad), Retry weil Feed-Load dauert
+# HTTP(S)-Check im CT (nginx/gsad), Retry weil Feed-Load dauert.
+# nginx lauscht nach compose-Template auf 443 + WEB_PORT (TLS). Aeltere
+# Templates nutzten teils http - darum mehrere Kandidaten pruefen.
 HTTP_OK=0
 for i in $(seq 1 24); do
-  if pct exec "$CTID" -- curl -sk -o /dev/null -w "%{http_code}" "https://127.0.0.1:${WEB_PORT}/login" 2>/dev/null | grep -Eq "200|302|404"; then HTTP_OK=1; break; fi
-  if pct exec "$CTID" -- curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${WEB_PORT}/" 2>/dev/null | grep -Eq "200|302|404"; then HTTP_OK=1; break; fi
+  for URL in "https://127.0.0.1:${WEB_PORT}/login" "https://127.0.0.1:443/login" "http://127.0.0.1:${WEB_PORT}/" "http://127.0.0.1:${WEB_PORT}/login"; do
+    if pct exec "$CTID" -- curl -sk -o /dev/null -w "%{http_code}" "$URL" 2>/dev/null | grep -Eq "200|302|404"; then HTTP_OK=1; break 2; fi
+  done
   sleep 10
 done
 if [[ "$HTTP_OK" -eq 1 ]]; then
@@ -274,7 +329,8 @@ echo ""
 echo "================ FERTIG ================"
 echo "Greenbone OpenVAS (Community Edition)"
 echo "Container : $CTID ($HOSTNAME)"
-echo "Web-UI    : http://$CT_IP:$WEB_PORT  (ggf. https://$CT_IP bzw. https://$CT_IP:$WEB_PORT je nach nginx-Template)"
+echo "Web-UI    : https://$CT_IP:$WEB_PORT  (Login-Seite: https://$CT_IP:$WEB_PORT/login)"
+echo "Fallback  : https://$CT_IP (Port 443, gleicher nginx) bzw. http://$CT_IP:$WEB_PORT bei alten Templates"
 echo "Login     : $ADMIN_USER / $ADMIN_PASS"
 echo "Feed-Sync : dauert 30 Min - 2h! Erst danach scannen."
 echo "  Feed-Status: pct exec $CTID -- docker compose -f $INSTALL_DIR/compose.yaml logs -f gvmd"
