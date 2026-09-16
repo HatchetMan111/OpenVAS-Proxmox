@@ -6,8 +6,8 @@
 # keine Web-UI. Darum installiert dieses Script den kompletten offiziellen
 # Greenbone-Stack (gvmd + gsad + gsa + ospd-openvas + openvas-scanner +
 # openvasd + redis + postgres + nginx) per Docker Compose im LXC.
-# Ergebnis: Web-UI auf http://<LXC-IP>:9392 (und https://<LXC-IP>), alles
-# lokal, reboot-sicher via systemd.
+# Ergebnis: Web-UI auf https://<LXC-IP>/ (Port 443, TLS, GSA unter "/").
+# Port 9392 ist nur HTTP->HTTPS-Redirect. Alles lokal, reboot-sicher via systemd.
 #
 # Einzeiler (auf dem Proxmox-Host als root):
 #   bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVAS-Proxmox/main/install/openvas.sh)"
@@ -58,7 +58,7 @@ NAMESERVER="${NAMESERVER:-1.1.1.1}"
 UNPRIVILEGED="${UNPRIVILEGED:-1}"
 ONBOOT="${ONBOOT:-1}"
 NESTING="${NESTING:-1}"                   # Pflicht fuer Docker im LXC
-WEB_PORT="${WEB_PORT:-9392}"
+WEB_PORT="${WEB_PORT:-9392}"             # NUR HTTP->HTTPS-Redirect-Port (App selbst: https://<IP>/ auf 443)
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-}"              # leer = zufaellig generieren
 COMPOSE_URL="${COMPOSE_URL:-https://greenbone.github.io/docs/latest/_static/compose.yaml}"
@@ -378,21 +378,22 @@ CT_IP="$(pct exec "$CTID" -- hostname -I | awk '{print $1}')"
 [[ -z "$CT_IP" ]] && CT_IP="(DHCP-IP via 'pct exec $CTID -- hostname -I' prüfen)"
 msg "Container-IP: $CT_IP"
 
-# HTTP(S)-Check im CT (nginx/gsad), Retry weil Feed-Load dauert.
-# nginx lauscht nach compose-Template auf 443 + WEB_PORT (TLS). Aeltere
-# Templates nutzten teils http - darum mehrere Kandidaten pruefen.
+# HTTP(S)-Check im CT (nginx), Retry weil Container-Start dauert.
+# Belegtes nginx-Verhalten (compose-Template): Port 443 = TLS, GSA unter "/"
+# (200). Port WEB_PORT (9392) = Plain-HTTP, nur 301-Redirect auf https:443.
+# /login per Browser NICHT direkt aufrufen (gsad-API liefert 404) - die
+# GSA-App unter "/" zeigt das Login. 404 zaehlt NICHT als Erfolg.
 HTTP_OK=0
 for i in $(seq 1 24); do
-  for URL in "https://127.0.0.1:${WEB_PORT}/login" "https://127.0.0.1:443/login" "http://127.0.0.1:${WEB_PORT}/" "http://127.0.0.1:${WEB_PORT}/login"; do
-    if pct exec "$CTID" -- curl -sk -o /dev/null -w "%{http_code}" "$URL" 2>/dev/null | grep -Eq "200|302|404"; then HTTP_OK=1; break 2; fi
-  done
+  if pct exec "$CTID" -- curl -sk -o /dev/null -w "%{http_code}" "https://127.0.0.1:443/" 2>/dev/null | grep -Eq "200|302"; then HTTP_OK=1; break; fi
+  if pct exec "$CTID" -- curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${WEB_PORT}/" 2>/dev/null | grep -Eq "301|302"; then HTTP_OK=1; break; fi
   sleep 10
 done
 if [[ "$HTTP_OK" -eq 1 ]]; then
-  ok "Web-UI antwortet (localhost:${WEB_PORT} im CT)."
+  ok "Web-UI antwortet (https://localhost im CT, Redirect auf :${WEB_PORT} aktiv)."
 else
-  warn "Web-UI antwortet noch nicht - Feed lädt evtl. noch. Logs: pct exec $CTID -- docker compose -f $INSTALL_DIR/compose.yaml logs -f"
-  warn "Trotzdem fortfahren, URL unten testen + Feed-Status pruefen."
+  warn "Web-UI antwortet noch nicht - nginx/gsad starten evtl. noch. Logs: pct exec $CTID -- bash -c 'cd $INSTALL_DIR && docker compose logs nginx gsad'"
+  warn "Trotzdem fortfahren, URL unten testen + Container-Status pruefen."
 fi
 
 trap - ERR
@@ -400,8 +401,9 @@ echo ""
 echo "================ FERTIG ================"
 echo "Greenbone OpenVAS (Community Edition)"
 echo "Container : $CTID ($HOSTNAME)"
-echo "Web-UI    : https://$CT_IP:$WEB_PORT  (Login-Seite: https://$CT_IP:$WEB_PORT/login)"
-echo "Fallback  : https://$CT_IP (Port 443, gleicher nginx) bzw. http://$CT_IP:$WEB_PORT bei alten Templates"
+echo "Web-UI    : https://$CT_IP/  (GSA-Login, selbstsigniertes Zertifikat bestaetigen)"
+echo "Redirect  : http://$CT_IP:$WEB_PORT/  -> leitet automatisch auf https um"
+echo "WICHTIG   : KEIN https://$CT_IP:$WEB_PORT und KEIN /login in der URL (Port $WEB_PORT = Plain-HTTP-Redirect, /login = gsad-API)!"
 echo "Login     : $ADMIN_USER / $ADMIN_PASS"
 echo "Feed-Sync : dauert 30 Min - 2h! Erst danach scannen."
 echo "  Feed-Status: pct exec $CTID -- docker compose -f $INSTALL_DIR/compose.yaml logs -f gvmd"

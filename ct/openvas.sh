@@ -32,7 +32,7 @@ function update_script() {
   cd /opt/greenbone
   $STD docker compose pull
   $STD docker compose up -d
-  msg_ok "Update abgeschlossen. Web-UI: https://$(hostname -I | awk '{print $1}'):9392/login"
+  msg_ok "Update abgeschlossen. Web-UI: https://$(hostname -I | awk '{print $1}')/ (Redirect: http://$(hostname -I | awk '{print $1}'):9392/)"
   exit
 }
 
@@ -43,7 +43,7 @@ description
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
 echo -e "${INFO}${YW} Access it using the following URL:${CL}"
-echo -e "${TAB}${GATEWAY}${BGN}https://${IP}:9392/login${CL}"
-echo -e "${TAB}${GATEWAY}${BGN}https://${IP}/login (Port 443, gleicher nginx)${CL}"
+echo -e "${TAB}${GATEWAY}${BGN}https://${IP}/${CL}"
+echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:9392/ (Redirect auf https)${CL}"
 echo -e "${INFO} Login: admin (Passwort siehe Install-Log im Container: cat /opt/greenbone/.admin_pass)${CL}"
 echo -e "${INFO} Hinweis: Feed-Sync dauert 30 Min - 2h bis zum ersten Scan.${CL}"

@@ -11,7 +11,7 @@ Greenbone Community Edition (vollständiger Stack: Scanner + Manager + Web-UI) a
 | openvas-scanner / openvasd / ospd-openvas | `openvas`, `openvasd`, `ospd-openvas` | Scan-Engine + Notus |
 | gvmd | `gvmd` | Manager (User, Tasks, Feed-Import) |
 | gsad + gsa | `gsad`, `gsa` | Web-Daemon + Web-UI |
-| nginx | `nginx` | TLS-Reverse-Proxy, Ports **443 + 9392** (auf `0.0.0.0` geöffnet für LAN) |
+| nginx | `nginx` | TLS-Reverse-Proxy: App auf **443** (GSA unter `/`), Port **9392** nur HTTP→HTTPS-Redirect (beide auf `0.0.0.0` für LAN) |
 | postgres | `pg-gvm`, `pg-gvm-migrator` | Datenbank |
 | redis | `redis-server` | Task-Queue |
 | Feed-Loader | `vulnerability-tests`, `scap-data`, `cert-bund-data`, `dfn-cert-data`, `data-objects`, `notus-data`, `report-formats`, `gpg-data`, `gvm-config`, `configure-openvas`, `gvm-tools` | NVTs, SCAP, CERT, Notus (Feed + Images: ~15–25 GB) |
@@ -64,14 +64,14 @@ ADMIN_PASS='MeinStarkesPass!' bash -c "$(wget -qLO - https://raw.githubuserconte
 | `STORAGE` / `TEMPLATE_STORAGE` | `local-lvm` / `local` | LXC-Disk- bzw. Template-Storage |
 | `BRIDGE` | `vmbr0` | Netzwerk-Bridge |
 | `IP_MODE` / `GW` | `dhcp` / leer | Statisch z. B. `IP_MODE=192.168.1.50/24 GW=192.168.1.1` |
-| `WEB_PORT` | `9392` | Web-UI-Port (nginx lauscht zusätzlich auf 443) |
+| `WEB_PORT` | `9392` | Nur HTTP→HTTPS-Redirect-Port (App selbst immer auf `https://<IP>/` Port 443) |
 | `ADMIN_USER` / `ADMIN_PASS` | `admin` / zufällig (16 Zeichen) | Web-UI-Login |
 | `INSTALL_DIR` | `/opt/greenbone` | Pfad im CT |
 | `COMPOSE_URL` | Greenbone-Docs `compose.yaml` | Nur bei Bedarf überschreiben (Version pinnen) |
 
 ## Nach der Installation
 
-1. **Web-UI öffnen:** `https://<LXC-IP>:9392/login` (Fallback `https://<LXC-IP>/login`). Zertifikatswarnung bestätigen (selbstsigniert). Login: `admin` + Passwort aus der Abschlussausgabe (oder `pct exec <CTID> -- cat /opt/greenbone/.admin_pass`).
+1. **Web-UI öffnen:** `https://<LXC-IP>/` (GSA-Login, selbstsigniertes Zertifikat bestätigen). Alternativ `http://<LXC-IP>:9392/` (leitet auf https um). **Nicht** `https://<IP>:9392` (dort nur Plain-HTTP → Browser-Fehler) und **kein** `/login` in der URL (GSA-App unter `/`; `/login` ist gsad-API und gibt 404). Login: `admin` + Passwort aus der Abschlussausgabe (oder `pct exec <CTID> -- cat /opt/greenbone/.admin_pass`).
 2. **Feed abwarten:** 30 Min – 2 h bis zum ersten Scan! Status:
    ```bash
    pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose ps && docker compose logs -f gvmd'
@@ -80,7 +80,7 @@ ADMIN_PASS='MeinStarkesPass!' bash -c "$(wget -qLO - https://raw.githubuserconte
    ```bash
    pct reboot <CTID> && sleep 60
    pct exec <CTID> -- systemctl is-active docker greenbone-openvas
-   curl -sk -o /dev/null -w "%{http_code}\n" https://<LXC-IP>:9392/login  # 200/302 = ok
+   curl -sk -o /dev/null -w "%{http_code}\n" https://<LXC-IP>/  # 200 = ok
    ```
 4. **Skalieren ohne Neuinstallation:** `pct set <CTID> --cores 4 --memory 8192` + CT-Neustart; Platte: `pct resize <CTID> rootfs +30G` (geht auch nachträglich, ohne Datenverlust).
 
@@ -148,10 +148,11 @@ pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose exec -u gvmd -T 
 
 ### Web-UI antwortet nicht / Verbindung verweigert
 
-1. Bindung prüfen: `pct exec <CTID> -- grep -n "9392\|443" /opt/greenbone/compose.yaml` muss `0.0.0.0:9392` + `0.0.0.0:443` zeigen (Skript patcht `127.0.0.1` automatisch).
-2. Immer **https** nutzen (`https://<IP>:9392/login`), nicht http.
-3. Container-Status: `pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose ps'`.
+1. Richtige URL? App = `https://<IP>/` (443, TLS). `https://<IP>:9392` geht **nie** (9392 = Plain-HTTP-Redirect, TLS dort → Browser-Fehler). Test vom Host: `curl -sk -o /dev/null -w "%{http_code}\n" https://<IP>/` muss `200` liefern; `curl -s -o /dev/null -w "%{http_code}\n" http://<IP>:9392/` muss `301` liefern.
+2. Bindung prüfen: `pct exec <CTID> -- bash -c 'docker port greenbone-community-edition-nginx-1'` muss `0.0.0.0:443` + `0.0.0.0:9392` zeigen (Skript patcht `127.0.0.1` in compose.yaml automatisch).
+3. Container-Status: `pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose ps nginx gsad'`, bei Problemen `docker compose logs --tail=30 nginx`.
 4. Firewall/Reverse-Proxy vor Proxmox? Port 9392 + 443 freigeben.
+5. Nur Zertifikatswarnung im Browser? Normal (selbstsigniert) — bestätigen, nicht abbrechen.
 
 ### OOM / Feed bricht ab / Postgres stirbt
 

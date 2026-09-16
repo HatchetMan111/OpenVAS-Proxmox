@@ -158,15 +158,16 @@ fi
 if [[ "$(cat "$INSTALL_DIR/.fallback" 2>/dev/null || echo none)" == "greenbone-fallback=1" ]]; then
   msg_info "WARN: Fallback-Modus - nach fertigem Feed einmal 'docker compose up -d && systemctl restart greenbone-openvas' im CT ausfuehren."
 fi
+# nginx: 443 = TLS-App (GSA unter "/", 200), WEB_PORT (9392) = Plain-HTTP,
+# nur 301-Redirect auf https:443. 404 zaehlt NICHT als Erfolg (gsad-API!).
 WEB_OK=0
 for i in $(seq 1 24); do
-  for URL in "https://127.0.0.1:${WEB_PORT}/login" "https://127.0.0.1:443/login" "http://127.0.0.1:${WEB_PORT}/" "http://127.0.0.1:${WEB_PORT}/login"; do
-    if curl -sk -o /dev/null -w "%{http_code}" "$URL" 2>/dev/null | grep -Eq "200|302|404"; then WEB_OK=1; break 2; fi
-  done
+  if curl -sk -o /dev/null -w "%{http_code}" "https://127.0.0.1:443/" 2>/dev/null | grep -Eq "200|302"; then WEB_OK=1; break; fi
+  if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${WEB_PORT}/" 2>/dev/null | grep -Eq "301|302"; then WEB_OK=1; break; fi
   sleep 10
 done
-[[ "$WEB_OK" -eq 1 ]] || msg_error "Web-UI antwortet noch nicht (Feed laedt evtl. noch). Fortfahren + Logs pruefen: docker compose -f $INSTALL_DIR/compose.yaml logs -f"
-msg_ok "Web-UI erreichbar (https://<CT-IP>:${WEB_PORT}/login)"
+[[ "$WEB_OK" -eq 1 ]] || msg_error "Web-UI antwortet noch nicht. Logs pruefen: docker compose -f $INSTALL_DIR/compose.yaml logs nginx gsad"
+msg_ok "Web-UI erreichbar (https://<CT-IP>/, Redirect http://<CT-IP>:${WEB_PORT}/)"
 
 motd_ssh
 customize
