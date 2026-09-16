@@ -146,7 +146,8 @@ FEED_OWNER="$(docker compose -f "$INSTALL_DIR/compose.yaml" exec -u gvmd -T gvmd
 echo "$ADMIN_USER" > "$INSTALL_DIR/.admin_user"
 printf '%s' "$ADMIN_PASS" > "$INSTALL_DIR/.admin_pass"
 chmod 600 "$INSTALL_DIR/.admin_pass"
-msg_ok "Deployed Stack (Admin: $ADMIN_USER)"
+msg_ok "Deployed Stack"
+echo "### Web-UI Login: https://<CT-IP>/ | User: $ADMIN_USER | Pass: $ADMIN_PASS (auch in $INSTALL_DIR/.admin_pass) ###"
 
 msg_info "Verifying Installation"
 systemctl is-active --quiet docker || { msg_error "docker.service nicht aktiv!"; journalctl -u docker --no-pager -n 50; exit 1; }

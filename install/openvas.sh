@@ -185,9 +185,20 @@ diag() {
   free -m >&2 || true
 }
 
+# retry <anzahl> <befehl...>: fuer transiente Netzfehler (apt, pull, curl).
+retry() {
+  local n=0 max="$1"; shift
+  until "$@"; do
+    n=$((n+1))
+    if [[ "$n" -ge "$max" ]]; then echo "[CT] FEHLER nach $max Versuchen: $*" >&2; return 1; fi
+    echo "[CT] Versuch $n/$max fehlgeschlagen, warte 15s: $*" >&2
+    sleep 15
+  done
+}
+
 echo "[CT] Debian aktualisieren ..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
+retry 3 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl
 
 echo "[CT] Docker installieren (falls fehlt) ..."
@@ -227,7 +238,7 @@ cd "$INSTALL_DIR"
 # compose.yaml: neu laden wenn fehlend, leer oder ohne gvmd-Service (veraltete Datei).
 if [[ ! -s compose.yaml ]] || ! grep -q "^\s*gvmd:" compose.yaml 2>/dev/null; then
   echo "[CT] Lade offizielles compose.yaml ..."
-  curl -fSL "$COMPOSE_URL" -o compose.yaml
+  retry 3 curl -fSL "$COMPOSE_URL" -o compose.yaml
 else
   echo "[CT] compose.yaml vorhanden ($(wc -l < compose.yaml) Zeilen), kein Re-Download."
 fi
@@ -266,7 +277,7 @@ systemctl daemon-reload
 systemctl enable greenbone-openvas.service
 
 echo "[CT] Images ziehen ..."
-docker compose -f "$INSTALL_DIR/compose.yaml" pull
+retry 3 docker compose -f "$INSTALL_DIR/compose.yaml" pull
 
 echo "[CT] Stack starten ..."
 echo "[CT] Hinweis: 'Created' / 'health: starting' bei gvmd/gsad/nginx ist NORMAL solange scap-data/vulnerability-tests laden."
@@ -397,14 +408,31 @@ else
 fi
 
 trap - ERR
+# Zugangsdaten: Source of Truth ist der CT (nicht die Host-Variablen).
+CT_ADMIN_USER="$(pct exec "$CTID" -- cat "$INSTALL_DIR/.admin_user" 2>/dev/null || echo "$ADMIN_USER")"
+CT_ADMIN_PASS="$(pct exec "$CTID" -- cat "$INSTALL_DIR/.admin_pass" 2>/dev/null || echo "$ADMIN_PASS")"
+CRED_FILE="/root/openvas-${CTID}-login.txt"
+{
+  echo "Greenbone OpenVAS - CT $CTID ($HOSTNAME)"
+  echo "URL: https://$CT_IP/"
+  echo "User: $CT_ADMIN_USER"
+  echo "Pass: $CT_ADMIN_PASS"
+} > "$CRED_FILE"
+chmod 600 "$CRED_FILE"
 echo ""
 echo "================ FERTIG ================"
 echo "Greenbone OpenVAS (Community Edition)"
 echo "Container : $CTID ($HOSTNAME)"
-echo "Web-UI    : https://$CT_IP/  (GSA-Login, selbstsigniertes Zertifikat bestaetigen)"
+echo "############################################################"
+echo "# Web-UI Login:"
+echo "#   URL : https://$CT_IP/"
+echo "#   User: $CT_ADMIN_USER"
+echo "#   Pass: $CT_ADMIN_PASS"
+echo "############################################################"
+echo "Gesichert in: $CRED_FILE (chmod 600)"
+echo "Abruf jederzeit: pct exec $CTID -- cat $INSTALL_DIR/.admin_pass"
 echo "Redirect  : http://$CT_IP:$WEB_PORT/  -> leitet automatisch auf https um"
 echo "WICHTIG   : KEIN https://$CT_IP:$WEB_PORT und KEIN /login in der URL (Port $WEB_PORT = Plain-HTTP-Redirect, /login = gsad-API)!"
-echo "Login     : $ADMIN_USER / $ADMIN_PASS"
 echo "Feed-Sync : dauert 30 Min - 2h! Erst danach scannen."
 echo "  Feed-Status: pct exec $CTID -- docker compose -f $INSTALL_DIR/compose.yaml logs -f gvmd"
 echo "Reboot    : Container onboot=1, Stack via systemd (greenbone-openvas.service, Restart ueber Docker restart-policy)"

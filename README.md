@@ -71,7 +71,7 @@ ADMIN_PASS='MeinStarkesPass!' bash -c "$(wget -qLO - https://raw.githubuserconte
 
 ## Nach der Installation
 
-1. **Web-UI öffnen:** `https://<LXC-IP>/` (GSA-Login, selbstsigniertes Zertifikat bestätigen). Alternativ `http://<LXC-IP>:9392/` (leitet auf https um). **Nicht** `https://<IP>:9392` (dort nur Plain-HTTP → Browser-Fehler) und **kein** `/login` in der URL (GSA-App unter `/`; `/login` ist gsad-API und gibt 404). Login: `admin` + Passwort aus der Abschlussausgabe (oder `pct exec <CTID> -- cat /opt/greenbone/.admin_pass`).
+1. **Web-UI öffnen:** `https://<LXC-IP>/` (GSA-Login, selbstsigniertes Zertifikat bestätigen). Alternativ `http://<LXC-IP>:9392/` (leitet auf https um). **Nicht** `https://<IP>:9392` (dort nur Plain-HTTP → Browser-Fehler) und **kein** `/login` in der URL (GSA-App unter `/`; `/login` ist gsad-API und gibt 404). Login: `admin` + Passwort — steht in der Abschluss-Box, in `/root/openvas-<CTID>-login.txt` auf dem Host (600) und im CT unter `/opt/greenbone/.admin_pass` (`pct exec <CTID> -- cat /opt/greenbone/.admin_pass`).
 2. **Feed abwarten:** 30 Min – 2 h bis zum ersten Scan! Status:
    ```bash
    pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose ps && docker compose logs -f gvmd'
