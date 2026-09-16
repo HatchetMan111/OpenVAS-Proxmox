@@ -14,7 +14,7 @@ Greenbone Community Edition (vollständiger Stack: Scanner + Manager + Web-UI) a
 | nginx | `nginx` | TLS-Reverse-Proxy, Ports **443 + 9392** (auf `0.0.0.0` geöffnet für LAN) |
 | postgres | `pg-gvm`, `pg-gvm-migrator` | Datenbank |
 | redis | `redis-server` | Task-Queue |
-| Feed-Loader | `vulnerability-tests`, `scap-data`, `cert-bund-data`, `dfn-cert-data`, `data-objects`, `notus-data`, `report-formats`, `gpg-data`, `gvm-config`, `configure-openvas`, `gvm-tools` | NVTs, SCAP, CERT, Notus (~10–15 GB) |
+| Feed-Loader | `vulnerability-tests`, `scap-data`, `cert-bund-data`, `dfn-cert-data`, `data-objects`, `notus-data`, `report-formats`, `gpg-data`, `gvm-config`, `configure-openvas`, `gvm-tools` | NVTs, SCAP, CERT, Notus (Feed + Images: ~15–25 GB) |
 
 Installationspfad im CT: `/opt/greenbone/compose.yaml`, systemd-Unit: `greenbone-openvas.service`, Zugangsdaten: `/opt/greenbone/.admin_user` / `.admin_pass` (600).
 
@@ -22,7 +22,7 @@ Installationspfad im CT: `/opt/greenbone/compose.yaml`, systemd-Unit: `greenbone
 
 - Proxmox VE 8.x, Internet (Docker Hub + `registry.community.greenbone.net` + Greenbone-Feed erreichbar)
 - Template `debian-12-standard` (wird automatisch geladen, wenn fehlend)
-- **Minimum: 2 vCPU / 4 GB RAM / 20 GB Disk.** Unter 4 GB sterben Postgres/gvmd per OOM, der Feed-Sync bricht ab. Produktiv: 4 vCPU / 8 GB / 30–60 GB.
+- **Minimum: 2 vCPU / 4 GB RAM / 40 GB Disk.** Unter 4 GB RAM sterben Postgres/gvmd per OOM; unter ~15 GB freier Platte bricht Docker per `no space left on device` ab (Images + Feed brauchen ~15–25 GB). Produktiv: 4 vCPU / 8 GB / 60 GB.
 - LXC braucht `nesting=1` + `keyctl=1` (setzt das Skript automatisch) für Docker.
 - CT-ID frei, Bridge `vmbr0`, Storage `local-lvm` (alles per Env überschreibbar).
 
@@ -42,7 +42,7 @@ bash -x -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVA
 ### Beispiele
 
 ```bash
-# Produktiv-Profil (4 CPU / 8 GB / 30 GB):
+# Produktiv-Profil (4 CPU / 8 GB / 60 GB):
 PROFILE=produktiv bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVAS-Proxmox/main/install/openvas.sh)"
 
 # Statische IP:
@@ -57,7 +57,7 @@ ADMIN_PASS='MeinStarkesPass!' bash -c "$(wget -qLO - https://raw.githubuserconte
 
 | Var | Default | Bedeutung |
 |---|---|---|
-| `PROFILE` | `sparsam` (2 CPU / 4096 MB / 20 GB) | `produktiv` = 4 CPU / 8192 MB / 30 GB |
+| `PROFILE` | `sparsam` (2 CPU / 4096 MB / 40 GB) | `produktiv` = 4 CPU / 8192 MB / 60 GB |
 | `CPU` / `RAM` / `DISK` | s. Profil | Direkt-Override schlägt `PROFILE`. **RAM nie unter 4096!** |
 | `CTID` | nächste freie ID (`pvesh get /cluster/nextid`) | Container-ID |
 | `HOSTNAME` | `openvas` | CT-Hostname |
@@ -82,11 +82,31 @@ ADMIN_PASS='MeinStarkesPass!' bash -c "$(wget -qLO - https://raw.githubuserconte
    pct exec <CTID> -- systemctl is-active docker greenbone-openvas
    curl -sk -o /dev/null -w "%{http_code}\n" https://<LXC-IP>:9392/login  # 200/302 = ok
    ```
-4. **Skalieren ohne Neuinstallation:** `pct set <CTID> --cores 4 --memory 8192` + CT-Neustart; Platte: `pct resize <CTID> rootfs +20G`.
+4. **Skalieren ohne Neuinstallation:** `pct set <CTID> --cores 4 --memory 8192` + CT-Neustart; Platte: `pct resize <CTID> rootfs +30G` (geht auch nachträglich, ohne Datenverlust).
 
 Sparsam-Tipps: max. 1–2 Ziele, 1 paralleler Scan, kein Full-Port-Range beim ersten Test.
 
 ## Fehlerbehebung (häufige Fälle)
+
+### `no space left on device` (Platte voll — häufigster echter Abbruch)
+
+**Was man sieht:** `Error response from daemon: failed to set up container networking: ... no space left on device`, das Skript bricht sofort ab (kein Retry — bei voller Platte zwecklos).
+
+**Ursache:** 20-GB-Disks aus älteren installs reichen nicht: Docker-Images + Greenbone-Feed brauchen **~15–25 GB frei**. Der Preflight-Check meldet unter 15 GB frei ebenfalls sofort.
+
+**Soforthilfe (CT bleibt erhalten, keine Neuinstallation):**
+
+```bash
+# 1. Platte vergroessern (Host, geht live, ohne Datenverlust):
+pct resize <CTID> rootfs +30G   # auf 40-60 GB gesamt
+
+# 2a. Einfach Installer erneut laufen lassen (idempotent, setzt beim Pull/up fort):
+bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVAS-Proxmox/main/install/openvas.sh)"
+# 2b. Oder manuell im CT aufraeumen + starten:
+pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker system prune -f && docker compose up -d'
+```
+
+Hinweis: `docker system prune -f` löscht nur ungenutzte Images/Container, **keine Volumes** (Feed-Daten bleiben). Bestehende 20-GB-CTs per `pct resize` retten; neue CTs bekommen automatisch 40 GB (sparsam) bzw. 60 GB (`PROFILE=produktiv`).
 
 ### `dependency failed to start: ... scap-data-1 is unhealthy` (häufigster Abbruch)
 
@@ -108,7 +128,7 @@ pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose logs --tail=30 s
 pct exec <CTID> -- bash -c 'cd /opt/greenbone && docker compose up -d'
 ```
 
-Erst wenn `scap-data` über **2 h** `unhealthy` bleibt, liegt ein echtes Problem vor (Platte voll, RAM < 4 GB, Registry/Feed nicht erreichbar) — dann die drei Diagnosebefehle oben + `docker compose logs scap-data` sichern und melden.
+Erst wenn `scap-data` über **2 h** `unhealthy` bleibt, liegt ein echtes Problem vor (RAM < 4 GB, Registry/Feed nicht erreichbar — „Platte voll" bricht separat sofort ab, s. oben) — dann die drei Diagnosebefehle oben + `docker compose logs scap-data` sichern und melden.
 
 ### `Exit-Code 1` nach `Admin-User setzen` / `gvmd --get-users`
 

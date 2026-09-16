@@ -38,6 +38,17 @@ fi
 systemctl enable --now docker
 msg_ok "Installed Dependencies"
 
+msg_info "Disk check (Images + Feed brauchen ~15-25 GB frei)"
+DATA_DIR="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+FREE_GB="$(df -BG "$DATA_DIR" 2>/dev/null | awk 'NR==2{sub(/G/,"",$4); print $4+0}')"
+msg_info "Frei auf $DATA_DIR: ${FREE_GB:-?} GB"
+if [[ "${FREE_GB:-0}" -lt 15 ]]; then
+  msg_error "Nur ${FREE_GB:-?} GB frei - min. 15 GB noetig! Abhilfe: CT-Platte vergroessern (z.B. pct resize <CTID> rootfs +30G auf 40-60 GB) und erneut laufen lassen."
+  exit 1
+elif [[ "$FREE_GB" -lt 25 ]]; then
+  msg_info "WARN: Weniger als 25 GB frei - kann waehrend Feed-Sync knapp werden."
+fi
+
 msg_info "Deploying Greenbone Community Edition (openvas-scanner Stack)"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
@@ -89,7 +100,13 @@ $STD docker compose -f "$INSTALL_DIR/compose.yaml" pull
 msg_info "Starting stack (Retry bis 60 Min: 'scap-data unhealthy' direkt nach Start ist meist transient, Feed laedt noch)"
 UP_OK=0
 for i in $(seq 1 30); do
-  if docker compose -f "$INSTALL_DIR/compose.yaml" up -d 2>&1 | tail -n 5; then UP_OK=1; break; fi
+  if UP_LOG="$(docker compose -f "$INSTALL_DIR/compose.yaml" up -d 2>&1)"; then UP_OK=1; break; fi
+  echo "$UP_LOG" | tail -n 5 || true
+  if echo "$UP_LOG" | grep -qi "no space left on device"; then
+    msg_error "Platte voll ('no space left on device') - Abbruch. Abhilfe: pct resize <CTID> rootfs +30G (auf 40-60 GB), dann erneut laufen lassen oder 'docker system prune -f && docker compose up -d' im CT."
+    diag || true
+    exit 1
+  fi
   msg_info "'up -d' Versuch $i/30 fehlgeschlagen, warte 120s ..."
   sleep 120
   (( i % 5 == 0 )) && diag || true

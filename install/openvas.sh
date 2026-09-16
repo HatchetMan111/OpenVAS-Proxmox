@@ -15,10 +15,11 @@
 #   bash -x -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/OpenVAS-Proxmox/main/install/openvas.sh)"
 #
 # Getestet auf: Proxmox VE 8.x, LXC Template debian-12-standard
-# Profile: SPARSAM (Default zum Ausprobieren) = 2 CPU / 4 GB RAM / 20 GB.
-#   Das ist das dokumentierte Greenbone-Minimum - darunter (z.B. 2 GB) stirbt
-#   Postgres/gvmd per OOM, Feed-Sync schlaegt fehl. Nicht weiter abspecken!
-#   PRODUKTIV: PROFILE=produktiv (4 CPU / 8 GB / 30 GB, Feed: 60 GB empfohlen).
+# Profile: SPARSAM (Default zum Ausprobieren) = 2 CPU / 4 GB RAM / 40 GB.
+#   Das ist das dokumentierte Greenbone-Minimum - darunter (z.B. 2 GB RAM
+#   oder 20 GB Disk) sterben Postgres/gvmd per OOM bzw. Docker per ENOSPC
+#   (Images + Feed brauchen ~15-25 GB). Nicht weiter abspecken!
+#   PRODUKTIV: PROFILE=produktiv (4 CPU / 8 GB / 60 GB).
 # Enterprise-Alternative (kostenpflichtig/Trial, kein Community-Build):
 #   OPENVAS SCAN Appliance unterstuetzt seit 12/2025 offiziell Proxmox VE
 #   (.zst-Backup via /var/lib/vz/dump restoren), braucht aber 2 vCPU /
@@ -40,11 +41,11 @@ PROFILE="${PROFILE:-sparsam}"             # sparsam | produktiv
 if [[ "$PROFILE" == "produktiv" ]]; then
   CPU="${CPU:-4}"
   RAM="${RAM:-8192}"                      # MB
-  DISK="${DISK:-30}"                      # GB
+  DISK="${DISK:-60}"                      # GB (Images + Feed + DB/Logs)
 else
   CPU="${CPU:-2}"
   RAM="${RAM:-4096}"                      # MB, NICHT kleiner (OOM-Gefahr!)
-  DISK="${DISK:-20}"                      # GB
+  DISK="${DISK:-40}"                      # GB, NICHT kleiner (ENOSPC: Images + Feed ~15-25 GB!)
 fi
 SWAP="${SWAP:-512}"
 STORAGE="${STORAGE:-local-lvm}"
@@ -205,6 +206,21 @@ fi
 docker --version
 docker compose version
 
+echo "[CT] Platten-Check (Images + Feed brauchen ~15-25 GB frei) ..."
+DATA_DIR="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+FREE_GB="$(df -BG "$DATA_DIR" 2>/dev/null | awk 'NR==2{sub(/G/,"",$4); print $4+0}')"
+echo "[CT] Frei auf $DATA_DIR: ${FREE_GB:-?} GB"
+if [[ "${FREE_GB:-0}" -lt 15 ]]; then
+  echo "[CT] FEHLER: Nur ${FREE_GB:-?} GB frei - zu wenig fuer Greenbone (min. 15 GB frei noetig)." >&2
+  echo "[CT] Abhilfe vom Proxmox-Host (CT muss NICHT neu erstellt werden):" >&2
+  echo "[CT]   pct resize <CTID> rootfs +30G   # auf 40-60 GB gesamt vergroessern" >&2
+  echo "[CT] Danach Skript erneut laufen lassen (idempotent, setzt beim Pull fort)." >&2
+  exit 1
+elif [[ "$FREE_GB" -lt 25 ]]; then
+  echo "[CT] WARN: Weniger als 25 GB frei - kann waehrend Feed-Sync knapp werden." >&2
+  echo "[CT] Bei 'no space left on device': Platte vergroessern, s. Fehlermeldung / README." >&2
+fi
+
 echo "[CT] Greenbone-Verzeichnis: $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
@@ -257,7 +273,17 @@ echo "[CT] Hinweis: 'Created' / 'health: starting' bei gvmd/gsad/nginx ist NORMA
 echo "[CT] 'scap-data is unhealthy' kurz nach dem Start ist meist transient (Feed-Download laeuft noch) - es wird bis zu 60 Min neu versucht."
 UP_OK=0
 for i in $(seq 1 30); do
-  if docker compose -f "$INSTALL_DIR/compose.yaml" up -d 2>&1 | tail -n 5; then UP_OK=1; break; fi
+  if UP_LOG="$(docker compose -f "$INSTALL_DIR/compose.yaml" up -d 2>&1)"; then UP_OK=1; break; fi
+  echo "$UP_LOG" | tail -n 5 >&2 || true
+  if echo "$UP_LOG" | grep -qi "no space left on device"; then
+    echo "[CT] FEHLER: Platte voll ('no space left on device') - weitere Versuche zwecklos, breche sofort ab." >&2
+    diag
+    echo "[CT] Abhilfe vom Proxmox-Host (CT muss NICHT neu erstellt werden):" >&2
+    echo "[CT]   pct resize <CTID> rootfs +30G   # auf 40-60 GB gesamt vergroessern" >&2
+    echo "[CT]   danach: Skript erneut laufen lassen (idempotent) oder:" >&2
+    echo "[CT]   pct exec <CTID> -- bash -c 'cd $INSTALL_DIR && docker system prune -f && docker compose up -d'" >&2
+    exit 1
+  fi
   echo "[CT] 'up -d' Versuch $i/30 fehlgeschlagen (Feed laedt evtl. noch), warte 120s ..." >&2
   sleep 120
   if (( i % 5 == 0 )); then
